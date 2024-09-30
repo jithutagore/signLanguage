@@ -1,21 +1,19 @@
-import numpy as np
-from tensorflow.keras.models import load_model
 import cv2
+import numpy as np
 import mediapipe as mp
+from tensorflow.keras.models import load_model
 import os
 
-# Load the model
-model = load_model('action.h5')
+# Initialize MediaPipe Holistic
+mp_holistic = mp.solutions.holistic
 
-# Initialize Mediapipe for pose, face, and hand detection
-mp_pose = mp.solutions.pose
-mp_face = mp.solutions.face_mesh
-mp_hands = mp.solutions.hands
-
-# Load the label map (the same as used in training)
-DATA_PATH = os.path.join('MP_Data')
-actions = np.array([folder for folder in os.listdir(DATA_PATH) if os.path.isdir(os.path.join(DATA_PATH, folder))])
-label_map = {label: num for num, label in enumerate(actions)}
+def mediapipe_detection(image, model):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image.flags.writeable = False
+    results = model.process(image)
+    image.flags.writeable = True
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    return image, results
 
 def extract_keypoints(results):
     pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(33*4)
@@ -24,63 +22,44 @@ def extract_keypoints(results):
     rh = np.array([[res.x, res.y, res.z] for res in results.right_hand_landmarks.landmark]).flatten() if results.right_hand_landmarks else np.zeros(21*3)
     return np.concatenate([pose, face, lh, rh])
 
-# Function to preprocess the input image
-def preprocess_image(image):
-    # Convert the image to RGB
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+def predict_action(image_path, model, actions):
+    # Load image
+    image = cv2.imread(image_path)
 
-    # Process the image with Mediapipe to get landmarks
-    with mp_pose.Pose(static_image_mode=True) as pose, \
-         mp_face.FaceMesh(static_image_mode=True) as face, \
-         mp_hands.Hands(static_image_mode=True) as hands:
+    if image is None:
+        print(f"Error loading image: {image_path}")
+        return None
 
-        results_pose = pose.process(image_rgb)
-        results_face = face.process(image_rgb)
-        results_hands = hands.process(image_rgb)
+    # Detect keypoints using MediaPipe
+    with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+        image, results = mediapipe_detection(image, holistic)
+        keypoints = extract_keypoints(results)
 
-        # Combine results
-        results = type('', (), {})()  # Create a simple empty object
-        results.pose_landmarks = results_pose.pose_landmarks
-        results.face_landmarks = results_face.multi_face_landmarks[0] if results_face.multi_face_landmarks else None
-        results.left_hand_landmarks = results_hands.multi_hand_landmarks[0] if results_hands.multi_hand_landmarks else None
-        results.right_hand_landmarks = results_hands.multi_hand_landmarks[1] if results_hands.multi_hand_landmarks and len(results_hands.multi_hand_landmarks) > 1 else None
+    # Prepare the keypoints for prediction
+    keypoints = keypoints.reshape(1, n_timesteps, n_features)  # Reshape for LSTM
 
-    keypoints = extract_keypoints(results)
-    return keypoints
-
-def predict_action(image):
-    n_timesteps = 277  # Same as in your train.py
-    n_features = 6     # Update this according to your specific model's expected input
-
-    keypoints = preprocess_image(image)
-    
-    # Check the shape of keypoints
-    print("Keypoints shape before reshaping:", keypoints.shape)
-
-    # Ensure that the number of features matches the expected shape
-    if keypoints.shape[0] != n_features * n_timesteps:
-        raise ValueError(f"Expected {n_features * n_timesteps} features but got {keypoints.shape[0]}.")
-
-    # Reshape for LSTM (1, timesteps, features)
-    keypoints = keypoints.reshape(1, n_timesteps, n_features)  # Adjusted reshaping
-
+    # Make predictions
     prediction = model.predict(keypoints)
     action_index = np.argmax(prediction)
-    return action_index, actions[action_index]  # Return both the predicted action index and label
+    action_label = actions[action_index]
 
-# Test the model with images from a specified directory
-def test_model_on_directory(image_path):
+    return action_label
 
-    try:
-        image = cv2.imread(image_path)
-        if image is None:
-            raise ValueError(f"Image not found at path: {image_path}")
-        predicted_action_index, predicted_action_label = predict_action(image)
-        print(f'Predicted Action Index: {predicted_action_index}, Action Label: {predicted_action_label}')
-    except Exception as e:
-        print(f"Error processing: {e}")
+# Load the trained model
+model = load_model('action.h5')
 
-# Specify the directory containing test images
-if __name__ == "__main__":
-    test_image = r'data/train/A/A0_jpg.rf.0caf9445dbc2a944bb713661e9189e26_0.jpg'  # Update this to your test image directory
-    test_model_on_directory(test_image)
+# Define the number of timesteps and features based on your training data
+n_timesteps = 277 
+n_features = 1662 // n_timesteps
+
+# Example usage
+image_path = r'data/train/A/A0_jpg.rf.0caf9445dbc2a944bb713661e9189e26_0.jpg' 
+actions = np.array([folder for folder in os.listdir('MP_Data') if os.path.isdir(os.path.join('MP_Data', folder))])  # Load actions
+
+predicted_action = predict_action(image_path, model, actions)
+if predicted_action:
+    print(f'Predicted Action: {predicted_action}')
+
+
+
+
