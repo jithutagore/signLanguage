@@ -3,6 +3,7 @@ import cv2
 import xml.etree.ElementTree as ET
 import random
 from pathlib import Path
+import shutil
 
 # Paths
 voc_folder = "Sign-Language-1"  # Path to the root folder containing train, valid folders
@@ -61,47 +62,76 @@ def process_image(image_path, xml_path, split):
         output_path = f"{output_folder}/{split}/{label}/{output_filename}"
         cv2.imwrite(output_path, cropped_img)
 
-# Function to split data into train, valid, and test
-def split_data(image_files, split_ratio):
-    random.shuffle(image_files)
-    split_index = int(len(image_files) * split_ratio)
-    return image_files[:split_index], image_files[split_index:]
+def split_data_with_minimum(images_by_class, min_images_per_class=2, test_ratio=0.15):
+    train_images = {}
+    valid_images = {}
+    test_images = {}
 
-# List all folders in the root voc_folder
-for split in ['train', 'valid']:  # Only include existing splits
-    split_folder = os.path.join(voc_folder, split)
-    image_files = [f for f in os.listdir(split_folder) if f.endswith(".jpg")]
+    for class_label, images in images_by_class.items():
+        random.shuffle(images)
+        
+        # Ensure there are enough images to split, handle cases with fewer than the minimum
+        if len(images) < 2 * min_images_per_class:
+            print(f"Class '{class_label}' has only {len(images)} images, adjusting split.")
+            # Split the images proportionally if there are not enough
+            test_images[class_label] = images[:len(images)//2]
+            valid_images[class_label] = images[len(images)//2:]
+            train_images[class_label] = []
+        else:
+            # Allocate at least 2 images to valid and test
+            test_images[class_label] = images[:min_images_per_class]
+            valid_images[class_label] = images[min_images_per_class: min_images_per_class * 2]
+            remaining_images = images[min_images_per_class * 2:]
+        
+            # Distribute remaining images based on the test_ratio
+            split_index = int(len(remaining_images) * test_ratio)
+            test_images[class_label].extend(remaining_images[:split_index])
+            valid_images[class_label].extend(remaining_images[split_index:])
+        
+            # Remaining images go to train
+            train_images[class_label] = remaining_images[split_index:]
     
-    # Ensure XML files exist
-    xml_files = [f.replace(".jpg", ".xml") for f in image_files]
-    
-    # Extract classes from the XML files (unique labels)
-    classes = set()
-    for xml_file in xml_files:
-        xml_path = os.path.join(split_folder, xml_file)
-        if os.path.exists(xml_path):  # Check if XML file exists
-            bboxes = parse_voc_xml(xml_path)
-            for bbox in bboxes:
-                classes.add(bbox['label'])
-    
-    # Create folders for each class
-    create_output_dirs(classes)
-    
-    # Process each image in the current split
-    for image_file in image_files:
-        xml_file = image_file.replace(".jpg", ".xml")
-        process_image(os.path.join(split_folder, image_file), os.path.join(split_folder, xml_file), split)
+    return train_images, valid_images, test_images
 
-# Create the test split from the train data
+
+# Move images to corresponding folders
+def move_images(images_by_class, split):
+    for class_label, images in images_by_class.items():
+        for image_file in images:
+            xml_file = image_file.replace(".jpg", ".xml")
+            src_image_path = os.path.join(train_folder, image_file)
+            src_xml_path = os.path.join(train_folder, xml_file)
+            dst_image_path = os.path.join(output_folder, split, class_label, image_file)
+            dst_xml_path = os.path.join(output_folder, split, class_label, xml_file)
+            shutil.move(src_image_path, dst_image_path)
+            shutil.move(src_xml_path, dst_xml_path)
+
+# Main processing logic
 train_folder = os.path.join(voc_folder, 'train')
 train_image_files = [f for f in os.listdir(train_folder) if f.endswith(".jpg")]
 
-# Split the train images to create a test set
-train_images, test_images = split_data(train_image_files, 0.15)  # Pass 0.15 directly
+# Group images by class
+images_by_class = {}
+for image_file in train_image_files:
+    xml_file = image_file.replace(".jpg", ".xml")
+    xml_path = os.path.join(train_folder, xml_file)
+    if os.path.exists(xml_path):
+        bboxes = parse_voc_xml(xml_path)
+        for bbox in bboxes:
+            class_label = bbox['label']
+            if class_label not in images_by_class:
+                images_by_class[class_label] = []
+            images_by_class[class_label].append(image_file)
 
+# Create class directories in the output folders
+create_output_dirs(images_by_class.keys())
 
-# Move selected images to the test directory
-for test_image in test_images:
-    test_xml = test_image.replace(".jpg", ".xml")
-    os.rename(os.path.join(train_folder, test_image), os.path.join(output_folder, 'test', test_image))
-    os.rename(os.path.join(train_folder, test_xml), os.path.join(output_folder, 'test', test_xml))
+# Split data ensuring minimum images per class
+train_images, valid_images, test_images = split_data_with_minimum(images_by_class)
+
+# Move images to corresponding splits
+move_images(train_images, 'train')
+move_images(valid_images, 'valid')
+move_images(test_images, 'test')
+
+print("Data split complete.")
